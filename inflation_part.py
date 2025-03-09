@@ -1,46 +1,52 @@
+# Import required libraries
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import warnings
 warnings.filterwarnings("ignore")
 
-# Modeling libraries
-from sklearn.linear_model import LinearRegression, Ridge, Lasso
-from sklearn.preprocessing import PolynomialFeatures
-from sklearn.model_selection import train_test_split, GridSearchCV
-from sklearn.metrics import mean_squared_error
-from sklearn.neighbors import KNeighborsRegressor
-from sklearn.ensemble import RandomForestRegressor
-
-# Time series modeling
+# Statistical and time series libraries
 import statsmodels.api as sm
-import statsmodels.tsa.api as tsa
+from statsmodels.tsa.arima.model import ARIMA
 
-# For Generalized Additive Model (GAM)
+# Machine learning libraries
+from sklearn.linear_model import LinearRegression, Ridge, Lasso
+from sklearn.preprocessing import PolynomialFeatures, StandardScaler
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.neighbors import KNeighborsRegressor
+from sklearn.metrics import mean_squared_error, r2_score
+
+# For GAM modeling (ensure pygam is installed; if not, run: pip install pygam)
 from pygam import LinearGAM, s
 
-# ------------------------------
-# Data Preprocessing
-# ------------------------------
-# Load the dataset
-df = pd.read_csv("fredupdated.csv")
+# ---------------------------
+# 1. Data Loading and Preprocessing
+# ---------------------------
+# Load the dataset (update the file path as needed)
+file_path = "/content/fredupdated.csv"
+df = pd.read_csv(file_path)
 
-# Convert 'observation_date' to datetime and sort the DataFrame
+# Convert observation_date to datetime and sort the DataFrame
 df['observation_date'] = pd.to_datetime(df['observation_date'])
 df = df.sort_values(by='observation_date')
 
-# Compute the Inflation Rate as the year-over-year percentage change in CPIAUCSL
+# Compute Inflation Rate as the year-over-year percentage change in CPIAUCSL
 df['Inflation_Rate'] = df['CPIAUCSL'].pct_change(periods=12) * 100
 
-# Filter the data from 1948 onward (assuming data reliability from 1948 for unemployment and inflation)
-df_filtered = df[df['observation_date'] >= '1948-01-01'].copy()
+# Define additional predictor columns available in the dataset
+predictor_cols = ['UNRATE', 'GDP', 'PCE', 'FEDFUNDS', 'GS10', 
+                  'M2SL', 'GDPC1', 'CIVPART', 'PPIACO', 'CES0500000003']
 
-# ------------------------------
-# Visualization of Inflation Data
-# ------------------------------
-# Plot the Inflation Rate over time
+# Filter data from 1948 onward and drop rows missing either Inflation_Rate or any predictor
+df = df[df['observation_date'] >= '1948-01-01'].reset_index(drop=True)
+df_model = df.dropna(subset=['Inflation_Rate'] + predictor_cols).copy()
+
+# ---------------------------
+# 2. Visualizations
+# ---------------------------
+# Time Series Plot: Monthly Inflation Rate
 plt.figure(figsize=(12, 6))
-plt.plot(df_filtered['observation_date'], df_filtered['Inflation_Rate'], label='Inflation Rate', color='blue', alpha=0.7)
+plt.plot(df['observation_date'], df['Inflation_Rate'], label='Monthly Inflation Rate', color='blue', alpha=0.7)
 plt.title("Inflation Rate Over Time (1948 - 2025)")
 plt.xlabel("Year")
 plt.ylabel("Inflation Rate (%)")
@@ -48,12 +54,10 @@ plt.legend()
 plt.grid(True)
 plt.show()
 
-# Compute a 10-year (approximately 120-month) rolling mean of the Inflation Rate to capture long-term trends
-df_filtered['Rolling_Inflation'] = df_filtered['Inflation_Rate'].rolling(window=120, min_periods=1).mean()
-
-# Plot the Rolling Mean of Inflation Rate
+# 10-Year (120 months) Rolling Mean of Inflation Rate
+df['Rolling_Inflation'] = df['Inflation_Rate'].rolling(window=120, min_periods=1).mean()
 plt.figure(figsize=(12, 6))
-plt.plot(df_filtered['observation_date'], df_filtered['Rolling_Inflation'], label='10-Year Rolling Mean', color='red', alpha=0.8)
+plt.plot(df['observation_date'], df['Rolling_Inflation'], label='10-Year Rolling Mean', color='red', alpha=0.8)
 plt.title("10-Year Rolling Mean of Inflation Rate")
 plt.xlabel("Year")
 plt.ylabel("Inflation Rate (%)")
@@ -61,115 +65,145 @@ plt.legend()
 plt.grid(True)
 plt.show()
 
-# ------------------------------
-# Prepare Data for Modeling
-# ------------------------------
-# We use UNRATE as the predictor and Inflation_Rate as the response.
-# Drop rows with missing values in either column.
-model_data = df_filtered[['observation_date', 'UNRATE', 'Inflation_Rate']].dropna()
+# Scatter Plot: Unemployment vs. Inflation (Phillips Curve)
+plt.figure(figsize=(8, 6))
+plt.scatter(df_model['UNRATE'], df_model['Inflation_Rate'], alpha=0.5)
+plt.title("Phillips Curve: Inflation vs. Unemployment")
+plt.xlabel("Unemployment Rate (%)")
+plt.ylabel("Inflation Rate (%)")
+plt.grid(True)
+plt.show()
 
-# Create the feature matrix X and target vector y
-X = model_data[['UNRATE']].values
-y = model_data['Inflation_Rate'].values
+# ---------------------------
+# 3. Regression & Prediction Models Using Multiple Predictors
+# ---------------------------
+# Prepare the multivariate predictors (X) and response variable (y)
+X = df_model[predictor_cols].values   # All additional predictors including UNRATE
+y = df_model['Inflation_Rate'].values  # Response: Inflation Rate
 
-# Split the data into training and testing sets (here, we avoid shuffling to maintain time series order)
-split_index = int(len(model_data) * 0.8)
-X_train, X_test = X[:split_index], X[split_index:]
-y_train, y_test = y[:split_index], y[split_index:]
+# --- Model 1: Multivariate Linear Regression (OLS) ---
+X_sm = sm.add_constant(X)  # Add constant term for intercept
+ols_model = sm.OLS(y, X_sm).fit()
+print("Multivariate OLS Regression Summary:")
+print(ols_model.summary())
+print("\n")
 
-# ------------------------------
-# 1. Linear Regression Model (OLS)
-# ------------------------------
-lr_model = LinearRegression()
-lr_model.fit(X_train, y_train)
-y_pred_lr = lr_model.predict(X_test)
-rmse_lr = np.sqrt(mean_squared_error(y_test, y_pred_lr))
-print("Linear Regression RMSE:", rmse_lr)
+# --- Model 2: Regularized Regression (Ridge and Lasso) ---
+# Standardize predictors
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(X)
 
-# ------------------------------
-# 2. Ridge Regression (with Hyperparameter Tuning)
-# ------------------------------
-ridge = Ridge()
-params_ridge = {'alpha': [0.1, 1.0, 10.0, 100.0]}
-ridge_cv = GridSearchCV(ridge, params_ridge, cv=5)
-ridge_cv.fit(X_train, y_train)
-y_pred_ridge = ridge_cv.predict(X_test)
-rmse_ridge = np.sqrt(mean_squared_error(y_test, y_pred_ridge))
-print("Ridge Regression RMSE:", rmse_ridge, "Best alpha:", ridge_cv.best_params_['alpha'])
+# Ridge Regression
+ridge_reg = Ridge(alpha=1.0)
+ridge_reg.fit(X_scaled, y)
+y_pred_ridge = ridge_reg.predict(X_scaled)
+print("Ridge Regression Model:")
+print("Coefficients:", ridge_reg.coef_)
+print("Intercept:", ridge_reg.intercept_)
+print("R2 Score:", r2_score(y, y_pred_ridge))
+print("MSE:", mean_squared_error(y, y_pred_ridge))
+print("\n")
 
-# ------------------------------
-# 3. Lasso Regression (with Hyperparameter Tuning)
-# ------------------------------
-lasso = Lasso(max_iter=10000)
-params_lasso = {'alpha': [0.001, 0.01, 0.1, 1.0, 10.0]}
-lasso_cv = GridSearchCV(lasso, params_lasso, cv=5)
-lasso_cv.fit(X_train, y_train)
-y_pred_lasso = lasso_cv.predict(X_test)
-rmse_lasso = np.sqrt(mean_squared_error(y_test, y_pred_lasso))
-print("Lasso Regression RMSE:", rmse_lasso, "Best alpha:", lasso_cv.best_params_['alpha'])
+# Lasso Regression
+lasso_reg = Lasso(alpha=0.1)
+lasso_reg.fit(X_scaled, y)
+y_pred_lasso = lasso_reg.predict(X_scaled)
+print("Lasso Regression Model:")
+print("Coefficients:", lasso_reg.coef_)
+print("Intercept:", lasso_reg.intercept_)
+print("R2 Score:", r2_score(y, y_pred_lasso))
+print("MSE:", mean_squared_error(y, y_pred_lasso))
+print("\n")
 
-# ------------------------------
-# 4. Polynomial Regression Model (Degree 2)
-# ------------------------------
-poly = PolynomialFeatures(degree=2)
-X_train_poly = poly.fit_transform(X_train)
-X_test_poly = poly.transform(X_test)
-poly_lr = LinearRegression()
-poly_lr.fit(X_train_poly, y_train)
-y_pred_poly = poly_lr.predict(X_test_poly)
-rmse_poly = np.sqrt(mean_squared_error(y_test, y_pred_poly))
-print("Polynomial Regression (Degree 2) RMSE:", rmse_poly)
+# --- Model 3: Polynomial Regression (Degree 2) ---
+poly = PolynomialFeatures(degree=2, include_bias=False)
+X_poly = poly.fit_transform(X)
+poly_reg = LinearRegression()
+poly_reg.fit(X_poly, y)
+y_pred_poly = poly_reg.predict(X_poly)
+print("Polynomial Regression (Degree 2) Model:")
+print("Coefficients:", poly_reg.coef_)
+print("Intercept:", poly_reg.intercept_)
+print("R2 Score:", r2_score(y, y_pred_poly))
+print("MSE:", mean_squared_error(y, y_pred_poly))
+print("\n")
 
-# ------------------------------
-# 5. ARIMA Model on Inflation Rate (Time Series Model)
-# ------------------------------
-# For ARIMA, we work with the inflation time series directly.
-ts_data = df_filtered.set_index('observation_date')['Inflation_Rate'].dropna()
+# Plotting predictions of the polynomial model against actual inflation
+plt.figure(figsize=(8,6))
+plt.scatter(range(len(y)), y, alpha=0.5, label="Actual Inflation")
+plt.plot(range(len(y)), y_pred_poly, color='red', label="Polynomial Predictions")
+plt.title("Polynomial Regression (Degree 2): Actual vs. Predicted Inflation")
+plt.xlabel("Observation Index")
+plt.ylabel("Inflation Rate (%)")
+plt.legend()
+plt.grid(True)
+plt.show()
 
-# Fit an ARIMA model; here we use order (1, 0, 1) as an example. In practice, you would tune this.
-model_arima = tsa.ARIMA(ts_data, order=(1, 0, 1))
-arima_result = model_arima.fit()
+# --- Model 4: ARIMA Model for Inflation (Univariate) ---
+# ARIMA is applied on the full inflation time series, independent of the predictors.
+inflation_ts = df.set_index('observation_date')['Inflation_Rate'].dropna()
+# Use an ARIMA(1,1,1) model for demonstration (optimal orders can be selected using AIC/BIC)
+arima_model = ARIMA(inflation_ts, order=(1, 1, 1))
+arima_result = arima_model.fit()
+print("ARIMA(1,1,1) Model Summary:")
 print(arima_result.summary())
+print("\n")
 
-# ------------------------------
-# 6. Random Forest Regression Model
-# ------------------------------
-rf = RandomForestRegressor(n_estimators=100, random_state=42)
-rf.fit(X_train, y_train)
-y_pred_rf = rf.predict(X_test)
-rmse_rf = np.sqrt(mean_squared_error(y_test, y_pred_rf))
-print("Random Forest RMSE:", rmse_rf)
-
-# ------------------------------
-# 7. k-Nearest Neighbors (k-NN) Regression Model
-# ------------------------------
-knn = KNeighborsRegressor(n_neighbors=5)
-knn.fit(X_train, y_train)
-y_pred_knn = knn.predict(X_test)
-rmse_knn = np.sqrt(mean_squared_error(y_test, y_pred_knn))
-print("k-NN Regression RMSE:", rmse_knn)
-
-# ------------------------------
-# 8. Generalized Additive Model (GAM)
-# ------------------------------
-# Using a smoothing spline for the UNRATE predictor.
-gam = LinearGAM(s(0)).fit(X_train, y_train)
-y_pred_gam = gam.predict(X_test)
-rmse_gam = np.sqrt(mean_squared_error(y_test, y_pred_gam))
-print("GAM RMSE:", rmse_gam)
-
-# ------------------------------
-# Plotting Predictions vs. Actual Inflation Rate
-# ------------------------------
+# Plot ARIMA fitted values vs. actual inflation rate
 plt.figure(figsize=(12, 6))
-# Use the test period's dates from the model_data (the last 20% of the data)
-test_dates = model_data['observation_date'].iloc[split_index:]
-plt.plot(test_dates, y_test, label='Actual Inflation', color='black')
-plt.plot(test_dates, y_pred_lr, label='Linear Regression Predictions', color='blue')
-plt.plot(test_dates, y_pred_gam, label='GAM Predictions', color='green')
+plt.plot(inflation_ts.index, inflation_ts, label="Actual Inflation")
+plt.plot(inflation_ts.index, arima_result.fittedvalues, color='red', label="ARIMA Fitted")
+plt.title("ARIMA(1,1,1): Actual vs. Fitted Inflation")
 plt.xlabel("Year")
 plt.ylabel("Inflation Rate (%)")
-plt.title("Inflation Rate: Actual vs. Predictions")
+plt.legend()
+plt.grid(True)
+plt.show()
+
+# --- Model 5: Random Forest Regression ---
+rf_model = RandomForestRegressor(n_estimators=100, random_state=42)
+rf_model.fit(X, y)
+y_pred_rf = rf_model.predict(X)
+print("Random Forest Regression:")
+print("R2 Score:", r2_score(y, y_pred_rf))
+print("MSE:", mean_squared_error(y, y_pred_rf))
+print("\n")
+
+# --- Model 6: k-Nearest Neighbors Regression ---
+knn_model = KNeighborsRegressor(n_neighbors=5)
+knn_model.fit(X, y)
+y_pred_knn = knn_model.predict(X)
+print("k-Nearest Neighbors Regression (k=5):")
+print("R2 Score:", r2_score(y, y_pred_knn))
+print("MSE:", mean_squared_error(y, y_pred_knn))
+print("\n")
+
+# --- Model 7: Generalized Additive Model (GAM) ---
+# Build a GAM with a smoothing spline term for each predictor variable.
+# Build GAM terms by starting with the first term and adding the others
+gam_terms = s(0)
+for i in range(1, X.shape[1]):
+    gam_terms += s(i)
+
+gam = LinearGAM(gam_terms).fit(X, y)
+y_pred_gam = gam.predict(X)
+print("Generalized Additive Model (GAM):")
+print("R2 Score:", r2_score(y, y_pred_gam))
+print("MSE:", mean_squared_error(y, y_pred_gam))
+gam = LinearGAM(gam_terms).fit(X, y)
+y_pred_gam = gam.predict(X)
+print("Generalized Additive Model (GAM):")
+print("R2 Score:", r2_score(y, y_pred_gam))
+print("MSE:", mean_squared_error(y, y_pred_gam))
+print("\n")
+
+# Plot GAM predictions vs. actual inflation
+plt.figure(figsize=(8,6))
+plt.scatter(range(len(y)), y, alpha=0.5, label="Actual Inflation")
+plt.plot(range(len(y)), y_pred_gam, color='green', label="GAM Predictions")
+plt.title("GAM: Actual vs. Predicted Inflation")
+plt.xlabel("Observation Index")
+plt.ylabel("Inflation Rate (%)")
 plt.legend()
 plt.grid(True)
 plt.show()
