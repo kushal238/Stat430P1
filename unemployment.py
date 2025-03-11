@@ -13,6 +13,8 @@ from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
 from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import SplineTransformer
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
 
 import math
 
